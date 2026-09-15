@@ -1,11 +1,13 @@
 """
-MVP: 레퍼런스(선수) 영상 한 프레임 vs 사용자 영상 한 프레임의 관절 각도를 비교해
-어떤 관절이 얼마나 벗어났는지 출력한다.
+사용자 영상 한 프레임의 관절 각도를, 여러 선수 영상으로 만든 레퍼런스(평균±표준편차)와
+비교해 어떤 관절이 얼마나 벗어났는지 출력한다.
+
+레퍼런스는 build_reference.py로 미리 만들어둔다 (reference.json).
 
 사용법:
-    python pose_compare.py --ref ref.mp4 --ref-frame 42 --user user.mp4 --user-frame 30
+    python pose_compare.py --reference reference.json --user user.mp4 --user-frame 30
 
-ref-frame/user-frame은 임팩트 순간 프레임 번호를 직접 지정한다.
+user-frame은 임팩트 순간 프레임 번호를 직접 지정한다.
 자동 임팩트 탐지, 여러 프레임 시계열 정렬(DTW), 다중 카메라는 여기 없음.
 """
 import argparse
@@ -69,42 +71,47 @@ def compute_angles(kpts):
     return out
 
 
-def compare(ref_angles, user_angles):
+def compare_to_reference(user_angles, reference):
+    """reference[label] = {"mean": ..., "std": ..., "n": ...} (build_reference.py가 생성)"""
     feedback = []
-    for label in ANGLES:
-        r, u = ref_angles[label], user_angles[label]
-        if r is None or u is None:
+    for label, stat in reference.items():
+        u = user_angles.get(label)
+        if u is None:
             continue
-        diff = u - r
-        if abs(diff) >= FEEDBACK_THRESHOLD_DEG:
+        diff = u - stat["mean"]
+        threshold = max(FEEDBACK_THRESHOLD_DEG, 2 * stat["std"])
+        if abs(diff) >= threshold:
             direction = "더 펴야" if diff < 0 else "더 굽혀야"
             feedback.append(
-                f"- {label}: 선수 {r:.0f}도 vs 나 {u:.0f}도 (차이 {abs(diff):.0f}도) → {direction} 합니다"
+                f"- {label}: 기준 {stat['mean']:.0f}±{stat['std']:.0f}도 vs 나 {u:.0f}도 "
+                f"(차이 {abs(diff):.0f}도, 샘플 {stat['n']}개) → {direction} 합니다"
             )
     return feedback
 
 
 def main():
+    import json
     from ultralytics import YOLO
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ref", required=True)
-    parser.add_argument("--ref-frame", type=int, required=True)
+    parser.add_argument("--reference", required=True, help="build_reference.py로 만든 json")
     parser.add_argument("--user", required=True)
     parser.add_argument("--user-frame", type=int, required=True)
     parser.add_argument("--model", default="yolo11n-pose.pt")
     args = parser.parse_args()
 
+    with open(args.reference, encoding="utf-8") as f:
+        reference = json.load(f)
+
     model = YOLO(args.model)
-    ref_angles = compute_angles(extract_keypoints(args.ref, args.ref_frame, model))
     user_angles = compute_angles(extract_keypoints(args.user, args.user_frame, model))
 
-    print("관절별 각도 비교 (선수 vs 나)")
-    for label in ANGLES:
-        r, u = ref_angles[label], user_angles[label]
-        print(f"  {label}: {r:.0f}도 vs {u:.0f}도" if r and u else f"  {label}: 검출 실패")
+    print("관절별 각도 비교 (기준 vs 나)")
+    for label, stat in reference.items():
+        u = user_angles.get(label)
+        print(f"  {label}: {stat['mean']:.0f}±{stat['std']:.0f}도 vs {u:.0f}도" if u else f"  {label}: 검출 실패")
 
-    feedback = compare(ref_angles, user_angles)
+    feedback = compare_to_reference(user_angles, reference)
     print("\n교정 포인트")
     if feedback:
         for line in feedback:
@@ -118,6 +125,12 @@ def _self_check():
     assert abs(angle((1, 0), (0, 0), (0, 1)) - 90) < 1e-6
     assert abs(angle((1, 0), (0, 0), (-1, 0)) - 180) < 1e-6
     assert abs(angle((1, 0), (0, 0), (1, 0)) - 0) < 1e-6
+
+    # compare_to_reference(): 표준편차 안쪽이면 조용히, 크게 벗어나면 피드백
+    reference = {"테스트관절": {"mean": 90.0, "std": 2.0, "n": 5}}
+    assert compare_to_reference({"테스트관절": 91.0}, reference) == []
+    assert len(compare_to_reference({"테스트관절": 120.0}, reference)) == 1
+
     print("self-check OK")
 
 
