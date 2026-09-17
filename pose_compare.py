@@ -105,6 +105,14 @@ def select_by_orientation(samples, target, tolerance=ORIENTATION_TOLERANCE):
     return matched if len(matched) >= MIN_ORIENTATION_MATCHES else samples
 
 
+def select_by_shot_type(samples, shot_type):
+    """samples 중 shot_type이 정확히 같은 것만 반환. 하나도 없으면 전체로 폴백."""
+    if not shot_type:
+        return samples
+    matched = [s for s in samples if s.get("shot_type") == shot_type]
+    return matched if matched else samples
+
+
 def aggregate(angle_dicts):
     """[{관절: 각도}, ...] 리스트 -> {관절: {mean, std, n}}"""
     samples = {}
@@ -151,6 +159,7 @@ def main():
     parser.add_argument("--reference", required=True, help="build_reference.py로 만든 json")
     parser.add_argument("--user", required=True)
     parser.add_argument("--user-frame", type=int, required=True)
+    parser.add_argument("--shot-type", help="예: 포핸드드라이브, 백핸드발리 - 지정하면 같은 샷끼리만 비교")
     parser.add_argument("--model", default="yolo11n-pose.pt")
     args = parser.parse_args()
 
@@ -162,9 +171,13 @@ def main():
     user_angles = compute_angles(kpts)
     user_orientation = compute_orientation(kpts)
 
-    matched = select_by_orientation(samples, user_orientation)
+    matched = select_by_shot_type(samples, args.shot_type)
     if len(matched) < len(samples):
-        print(f"[방향 필터] 전체 {len(samples)}개 중 비슷한 방향 {len(matched)}개 샘플로 비교\n")
+        print(f"[샷 필터] 전체 {len(samples)}개 중 '{args.shot_type}' {len(matched)}개 샘플")
+
+    matched = select_by_orientation(matched, user_orientation)
+    if len(matched) < len(samples):
+        print(f"[방향 필터] 비슷한 방향 {len(matched)}개 샘플로 비교\n")
     reference = aggregate([s["angles"] for s in matched])
 
     print("관절별 각도 비교 (기준 vs 나)")
@@ -205,6 +218,12 @@ def _self_check():
     ]
     assert len(select_by_orientation(samples, target=1.0, tolerance=0.1)) == 2
     assert select_by_orientation(samples, target=1.0, tolerance=0.001) == samples
+
+    # select_by_shot_type(): 같은 샷 타입만 골라내고, 하나도 없으면 전체로 폴백
+    shot_samples = [{"shot_type": "포핸드"}, {"shot_type": "포핸드"}, {"shot_type": "백핸드"}]
+    assert len(select_by_shot_type(shot_samples, "포핸드")) == 2
+    assert select_by_shot_type(shot_samples, "발리") == shot_samples
+    assert select_by_shot_type(shot_samples, None) == shot_samples
 
     # aggregate(): 평균/표준편차/개수, None은 무시
     ref = aggregate([{"A": 80.0, "B": None}, {"A": 100.0, "B": 50.0}])
