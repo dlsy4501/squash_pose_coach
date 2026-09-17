@@ -1,6 +1,9 @@
 """
-여러 선수 영상(여러 프레임)에서 관절 각도를 뽑아 평균/표준편차로 "이상적인 자세"
-레퍼런스를 만든다. pose_compare.py가 이 결과(reference.json)를 사용자 자세와 비교한다.
+여러 선수 영상(여러 프레임)에서 관절 각도 + 몸 방향(orientation)을 뽑아
+reference.json에 원본 샘플 리스트로 저장한다.
+
+평균/표준편차는 여기서 미리 내지 않는다 - pose_compare.py가 비교 시점에
+사용자와 방향이 비슷한 샘플만 걸러서 그때 집계한다 (compute_orientation 참고).
 
 사용법:
     python build_reference.py --list samples.txt --out reference.json
@@ -13,9 +16,8 @@ samples.txt 형식 (한 줄에 하나, 임팩트 순간 프레임 번호를 직�
 """
 import argparse
 import json
-import statistics
 
-from pose_compare import compute_angles, extract_keypoints
+from pose_compare import compute_angles, compute_orientation, extract_keypoints
 
 
 def parse_list(path):
@@ -30,32 +32,15 @@ def parse_list(path):
     return pairs
 
 
-def aggregate(angle_dicts):
-    """[{관절: 각도}, ...] 리스트 -> {관절: {mean, std, n}}"""
-    samples = {}
-    for angles in angle_dicts:
-        for label, val in angles.items():
-            if val is not None:
-                samples.setdefault(label, []).append(val)
-
-    reference = {}
-    for label, vals in samples.items():
-        if not vals:
-            continue
-        reference[label] = {
-            "mean": statistics.mean(vals),
-            "std": statistics.pstdev(vals),
-            "n": len(vals),
-        }
-    return reference
-
-
 def build(pairs, model_name):
     from ultralytics import YOLO
 
     model = YOLO(model_name)
-    angle_dicts = [compute_angles(extract_keypoints(video, frame, model)) for video, frame in pairs]
-    return aggregate(angle_dicts)
+    samples = []
+    for video, frame in pairs:
+        kpts = extract_keypoints(video, frame, model)
+        samples.append({"orientation": compute_orientation(kpts), "angles": compute_angles(kpts)})
+    return samples
 
 
 def main():
@@ -66,14 +51,12 @@ def main():
     args = parser.parse_args()
 
     pairs = parse_list(args.list)
-    reference = build(pairs, args.model)
+    samples = build(pairs, args.model)
 
     with open(args.out, "w", encoding="utf-8") as f:
-        json.dump(reference, f, ensure_ascii=False, indent=2)
+        json.dump(samples, f, ensure_ascii=False, indent=2)
 
-    print(f"샘플 {len(pairs)}개로 레퍼런스 저장: {args.out}")
-    for label, stat in reference.items():
-        print(f"  {label}: 평균 {stat['mean']:.1f}도, 표준편차 {stat['std']:.1f} (n={stat['n']})")
+    print(f"샘플 {len(samples)}개 저장: {args.out}")
 
 
 def _self_check():
@@ -86,12 +69,6 @@ def _self_check():
         assert parse_list(path) == [("a.mp4", 10), ("b.mp4", 20)]
     finally:
         os.remove(path)
-
-    # aggregate: 평균/표준편차/개수가 맞는지, None은 무시하는지
-    ref = aggregate([{"A": 80.0, "B": None}, {"A": 100.0, "B": 50.0}])
-    assert ref["A"]["mean"] == 90.0 and ref["A"]["n"] == 2
-    assert ref["B"]["n"] == 1
-    assert "C" not in ref  # 값이 없는 관절은 결과에서 빠짐(C는 애초에 없음)
 
     print("self-check OK")
 

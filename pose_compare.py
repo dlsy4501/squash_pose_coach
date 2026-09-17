@@ -1,8 +1,11 @@
 """
-사용자 영상 한 프레임의 관절 각도를, 여러 선수 영상으로 만든 레퍼런스(평균±표준편차)와
-비교해 어떤 관절이 얼마나 벗어났는지 출력한다.
+사용자 영상 한 프레임의 관절 각도를, 여러 선수 영상 샘플(build_reference.py가 만든
+reference.json)과 비교해 어떤 관절이 얼마나 벗어났는지 출력한다.
 
-레퍼런스는 build_reference.py로 미리 만들어둔다 (reference.json).
+몸 방향(카메라를 얼마나 정면으로 보고 있는지)이 비슷한 샘플만 걸러서 평균/표준편차를
+내기 때문에, 완전히 다른 각도에서 찍은 레퍼런스와 비교되는 걸 어느 정도 막는다.
+depth 없이 2D keypoint만으로는 정확한 3D 방향은 알 수 없어서, 어깨 너비/몸통 길이
+비율을 방향의 근사치로 쓴다 (정면일수록 어깨가 넓게 보임).
 
 사용법:
     python pose_compare.py --reference reference.json --user user.mp4 --user-frame 30
@@ -12,6 +15,7 @@ user-frame은 임팩트 순간 프레임 번호를 직접 지정한다.
 """
 import argparse
 import math
+import statistics
 
 # COCO keypoint indices (YOLO pose 기본 포맷)
 KP = {
@@ -33,6 +37,11 @@ ANGLES = {
 }
 
 FEEDBACK_THRESHOLD_DEG = 15  # 이 이상 벌어지면 피드백 출력
+
+# ponytail: 경험적으로 정한 임계값. 방향 근사치(orientation_ratio)가 절대적인
+# 각도 단위가 아니라서 "몇 도 차이"로 못 정함 - 실제 샘플 모아보고 조정 필요
+ORIENTATION_TOLERANCE = 0.15
+MIN_ORIENTATION_MATCHES = 2  # 이보다 적게 매칭되면 방향 필터 없이 전체 샘플 사용
 
 
 def angle(a, b, c):
@@ -71,6 +80,51 @@ def compute_angles(kpts):
     return out
 
 
+def compute_orientation(kpts):
+    """어깨 너비 / 몸통 길이 비율. 정면을 볼수록 크고, 옆을 볼수록 작아짐(요 회전 근사).
+    depth가 없어서 정확한 각도는 아니고, "비슷한 방향인지" 비교용 상대값."""
+    l_sh, r_sh = kpts["L_SHOULDER"], kpts["R_SHOULDER"]
+    l_hip, r_hip = kpts["L_HIP"], kpts["R_HIP"]
+    shoulder_width = math.hypot(r_sh[0] - l_sh[0], r_sh[1] - l_sh[1])
+    mid_shoulder = ((l_sh[0] + r_sh[0]) / 2, (l_sh[1] + r_sh[1]) / 2)
+    mid_hip = ((l_hip[0] + r_hip[0]) / 2, (l_hip[1] + r_hip[1]) / 2)
+    torso_height = math.hypot(mid_shoulder[0] - mid_hip[0], mid_shoulder[1] - mid_hip[1])
+    if torso_height == 0:
+        return None
+    return shoulder_width / torso_height
+
+
+def select_by_orientation(samples, target, tolerance=ORIENTATION_TOLERANCE):
+    """samples 중 target과 방향이 비슷한 것만 반환. 매칭이 너무 적으면 전체로 폴백."""
+    if target is None:
+        return samples
+    matched = [
+        s for s in samples
+        if s.get("orientation") is not None and abs(s["orientation"] - target) <= tolerance
+    ]
+    return matched if len(matched) >= MIN_ORIENTATION_MATCHES else samples
+
+
+def aggregate(angle_dicts):
+    """[{관절: 각도}, ...] 리스트 -> {관절: {mean, std, n}}"""
+    samples = {}
+    for angles in angle_dicts:
+        for label, val in angles.items():
+            if val is not None:
+                samples.setdefault(label, []).append(val)
+
+    reference = {}
+    for label, vals in samples.items():
+        if not vals:
+            continue
+        reference[label] = {
+            "mean": statistics.mean(vals),
+            "std": statistics.pstdev(vals),
+            "n": len(vals),
+        }
+    return reference
+
+
 def compare_to_reference(user_angles, reference):
     """reference[label] = {"mean": ..., "std": ..., "n": ...} (build_reference.py가 생성)"""
     feedback = []
@@ -101,10 +155,17 @@ def main():
     args = parser.parse_args()
 
     with open(args.reference, encoding="utf-8") as f:
-        reference = json.load(f)
+        samples = json.load(f)  # build_reference.py가 만든 원본 샘플 리스트
 
     model = YOLO(args.model)
-    user_angles = compute_angles(extract_keypoints(args.user, args.user_frame, model))
+    kpts = extract_keypoints(args.user, args.user_frame, model)
+    user_angles = compute_angles(kpts)
+    user_orientation = compute_orientation(kpts)
+
+    matched = select_by_orientation(samples, user_orientation)
+    if len(matched) < len(samples):
+        print(f"[방향 필터] 전체 {len(samples)}개 중 비슷한 방향 {len(matched)}개 샘플로 비교\n")
+    reference = aggregate([s["angles"] for s in matched])
 
     print("관절별 각도 비교 (기준 vs 나)")
     for label, stat in reference.items():
@@ -130,6 +191,25 @@ def _self_check():
     reference = {"테스트관절": {"mean": 90.0, "std": 2.0, "n": 5}}
     assert compare_to_reference({"테스트관절": 91.0}, reference) == []
     assert len(compare_to_reference({"테스트관절": 120.0}, reference)) == 1
+
+    # compute_orientation(): 정면(어깨 넓게 보임)이 옆모습(어깨 좁게 보임)보다 커야 함
+    front = {"L_SHOULDER": (0, 0), "R_SHOULDER": (10, 0), "L_HIP": (1, 10), "R_HIP": (9, 10)}
+    side = {"L_SHOULDER": (0, 0), "R_SHOULDER": (2, 0), "L_HIP": (0.5, 10), "R_HIP": (1.5, 10)}
+    assert compute_orientation(front) > compute_orientation(side)
+
+    # select_by_orientation(): 비슷한 방향만 골라내고, 매칭 부족하면 전체로 폴백
+    samples = [
+        {"orientation": 1.0, "angles": {}},
+        {"orientation": 1.05, "angles": {}},
+        {"orientation": 3.0, "angles": {}},
+    ]
+    assert len(select_by_orientation(samples, target=1.0, tolerance=0.1)) == 2
+    assert select_by_orientation(samples, target=1.0, tolerance=0.001) == samples
+
+    # aggregate(): 평균/표준편차/개수, None은 무시
+    ref = aggregate([{"A": 80.0, "B": None}, {"A": 100.0, "B": 50.0}])
+    assert ref["A"]["mean"] == 90.0 and ref["A"]["n"] == 2
+    assert ref["B"]["n"] == 1
 
     print("self-check OK")
 
