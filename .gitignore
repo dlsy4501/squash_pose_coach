@@ -1,0 +1,5 @@
+ball_dataset/
+*.pt
+*.mp4
+.venv/
+runs/
