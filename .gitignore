@@ -3,3 +3,8 @@ ball_dataset/
 *.mp4
 .venv/
 runs/
+__pycache__/
+outputs/
+test_video/
+models/
+.DS_Store

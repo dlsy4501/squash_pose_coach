@@ -1,2 +1,8 @@
 ultralytics
+lap
 opencv-python
+pillow
+imageio-ffmpeg
+gradio>=4.44,<5
+huggingface_hub<1.0
+pydantic<2.11

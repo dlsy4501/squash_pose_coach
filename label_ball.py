@@ -3,7 +3,7 @@
 (ball_dataset/images/*.jpg, ball_dataset/labels/*.txt, 클래스 0 = ball)
 
 사용법:
-    python label_ball.py --video IMG_0433.MOV --n 300
+    python label_ball.py --video IMG_0433.MOV IMG_7867.MOV --n 150   # 영상 여러 개 가능
 키: 클릭=공 위치 저장 후 다음 / s=공이 안 보임(빈 라벨, 배경 학습용) / b=이전 프레임으로 / q=종료
 이미 라벨된 프레임은 건너뛰므로 q로 나갔다가 같은 명령으로 이어서 할 수 있다.
 """
@@ -18,19 +18,21 @@ def yolo_line(x, y, box, w, h):
 
 
 def extract_frames(video, n, out_dir, seed=0):
-    """영상을 처음부터 한 번만 훑으며 뽑는다(임의 seek은 프레임당 ~1초라 느림)."""
+    """영상을 처음부터 한 번만 훑으며 뽑는다(임의 seek은 프레임당 ~1초라 느림).
+    파일 이름은 영상이름_f프레임번호.jpg라서 영상이 여러 개여도 겹치지 않는다."""
     import cv2
     os.makedirs(out_dir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(video))[0]
     cap = cv2.VideoCapture(video)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     want = set(random.Random(seed).sample(range(total), min(n, total)))
-    print(f"프레임 {len(want)}장 추출 중 (1~2분 걸립니다)...")
+    print(f"{stem}: 프레임 {len(want)}장 추출 중 (1~2분 걸립니다)...")
     for i in range(total):
         if i not in want:
             cap.grab()
             continue
         ok, frame = cap.read()
-        path = os.path.join(out_dir, f"f{i:06d}.jpg")
+        path = os.path.join(out_dir, f"{stem}_f{i:06d}.jpg")
         if ok and not os.path.exists(path):
             cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
         if i % 2000 == 0:
@@ -90,16 +92,73 @@ def run_ui(img_dir, lbl_dir, box, scale):
     print("모든 프레임 라벨 완료")
 
 
+def run_review(pseudo_dir, img_dir, lbl_dir, box, scale):
+    """pseudo_label.py가 만든 후보를 검수한다. 확인한 프레임은 ball_dataset으로 옮겨진다.
+    스페이스/엔터=맞음 / 클릭=올바른 위치로 정정 / s=공 없음 / x=버림 / q=종료"""
+    import cv2
+    import shutil
+    os.makedirs(img_dir, exist_ok=True)
+    os.makedirs(lbl_dir, exist_ok=True)
+    names = sorted(f[:-4] for f in os.listdir(os.path.join(pseudo_dir, "images")) if f.endswith(".jpg"))
+    if not names:
+        print("검수할 후보가 없습니다")
+        return
+    click = []
+    cv2.namedWindow("review")
+    cv2.setMouseCallback("review", lambda e, x, y, *_: click.append((x / scale, y / scale)) if e == cv2.EVENT_LBUTTONDOWN else None)
+    for n, name in enumerate(names):
+        src_img, src_lbl = (os.path.join(pseudo_dir, "images", name + ".jpg"),
+                            os.path.join(pseudo_dir, "labels", name + ".txt"))
+        img = cv2.imread(src_img)
+        h, w = img.shape[:2]
+        _, cx, cy, *_ = open(src_lbl).read().split()
+        show = cv2.resize(img, None, fx=scale, fy=scale)
+        cv2.circle(show, (int(float(cx) * w * scale), int(float(cy) * h * scale)), int(box * scale * 0.9), (0, 255, 0), 2)
+        cv2.putText(show, f"{n + 1}/{len(names)}  space=OK  click=fix  s=none  x=drop  q=quit",
+                    (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.imshow("review", show)
+        click.clear()
+        while True:
+            key = cv2.waitKey(30) & 0xFF
+            dst_lbl = os.path.join(lbl_dir, name + ".txt")
+            if click:
+                open(dst_lbl, "w").write(yolo_line(click[-1][0], click[-1][1], box, w, h))
+            elif key in (ord(" "), 13):
+                shutil.copy(src_lbl, dst_lbl)
+            elif key == ord("s"):
+                open(dst_lbl, "w").close()
+            elif key == ord("x"):
+                os.remove(src_img); os.remove(src_lbl)
+                break
+            elif key == ord("q"):
+                cv2.destroyAllWindows()
+                return
+            else:
+                continue
+            shutil.move(src_img, os.path.join(img_dir, name + ".jpg"))
+            os.remove(src_lbl)
+            break
+    cv2.destroyAllWindows()
+    print("검수 완료")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--video", required=True)
-    ap.add_argument("--n", type=int, default=300)
+    ap.add_argument("--video", nargs="+", help="영상 파일 (여러 개 가능)")
+    ap.add_argument("--review", help="pseudo_label.py가 만든 폴더를 검수 (이때는 --video 불필요)")
+    ap.add_argument("--n", type=int, default=300, help="영상 하나당 뽑을 프레임 수")
     ap.add_argument("--out", default="ball_dataset")
     ap.add_argument("--box", type=int, default=28, help="라벨 박스 한 변(px). 공이 번진 길이보다 약간 크게")
     ap.add_argument("--scale", type=float, default=0.75, help="화면 표시 배율")
     a = ap.parse_args()
     img_dir = os.path.join(a.out, "images")
-    extract_frames(a.video, a.n, img_dir)
+    if a.review:
+        run_review(a.review, img_dir, os.path.join(a.out, "labels"), a.box, a.scale)
+        return
+    if not a.video:
+        ap.error("--video 또는 --review 가 필요합니다")
+    for v in a.video:
+        extract_frames(v, a.n, img_dir)
     run_ui(img_dir, os.path.join(a.out, "labels"), a.box, a.scale)
 
 
