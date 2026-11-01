@@ -47,6 +47,30 @@ def to_rows(rallies, fps, start=0.0):
     return [[r["id"], round(start + r["start"] / fps, 1), len(r["hits"]), r["guess"], r["reason"]] for r in rallies]
 
 
+def export_rows(rallies, fps, start=0.0, names=None):
+    """랠리 기록 저장용: 랠리마다 시작/끝/길이(초), 타격 수, 득점자(이름), 정정 여부.
+    names가 있으면 득점자를 이름으로, 없으면 슬롯 번호로 적는다. 무효 랠리는 득점자 ""."""
+    who = (lambda k: names[k]) if names else (lambda k: k)
+    rows = []
+    for r in rallies:
+        s0, s1 = start + r["start"] / fps, start + r["end"] / fps
+        rows.append(dict(rally=r["id"], start_s=round(s0, 1), end_s=round(s1, 1), duration_s=round(s1 - s0, 1),
+                         n_shots=len(r["hits"]), winner=who(r["winner"]) if r["winner"] is not None else "",
+                         manual=r.get("manual", False)))
+    return rows
+
+
+def save_csv(rallies, fps, path, start=0.0, names=None):
+    """export_rows 결과를 csv로 저장한다."""
+    import csv
+    rows = export_rows(rallies, fps, start, names)
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=["rally", "start_s", "end_s", "duration_s", "n_shots", "winner", "manual"])
+        w.writeheader()
+        w.writerows(rows)
+    return path
+
+
 def _self_check():
     H = lambda f, s: dict(frame=f, slot=s)
     # 랠리 1: 0,1,0 번 타격 (마지막 0) / 3초 넘게 쉬고 랠리 2: 1,0,1 (마지막 1) / 랠리 3: 타격 1번
@@ -63,6 +87,13 @@ def _self_check():
     assert score_at(rs, 60 + 30, 30) == [1, 0]
     assert score_at(rs, 10**6, 30) == [2, 0]         # 무효 랠리는 점수에 안 들어감
     assert to_rows(rs, 30)[0] == [1, 0.0, 3, 0, "마지막 타격자 (추정)"]
+
+    rows = export_rows(rs, 30, names=["민수", "지훈"])
+    assert rows[0] == dict(rally=1, start_s=0.0, end_s=2.0, duration_s=2.0, n_shots=3, winner="민수", manual=False)
+    assert rows[2]["winner"] == ""  # 무효 랠리는 득점자 없음
+    import tempfile
+    path = save_csv(rs, 30, tempfile.mktemp(suffix=".csv"), names=["민수", "지훈"])
+    assert open(path, encoding="utf-8-sig").readline().strip() == "rally,start_s,end_s,duration_s,n_shots,winner,manual"
     print("self-check OK")
 
 

@@ -16,6 +16,7 @@ import subprocess
 
 from ball_track import assign_hits, find_turns, interpolate, merge_hits, pick_track, remove_spikes
 from overlay_ui import PLAYER_COLORS, Overlay
+import rally
 from rally import apply_winners, score_at, split_rallies
 
 COURT_W, COURT_L = 6.4, 9.75  # m
@@ -322,7 +323,10 @@ def main():
             for s in ev["summary"]:
                 dist = f'{s["dist"]:.1f} m, ' if s["dist"] is not None else ""
                 print(f'{s["name"]}: {dist}타격 {s["shots"]}회, 득점 {s["points"]}')
-            print("saved", ev["out"])
+            data = ev["analysis"]
+            csv_path = os.path.splitext(a.out)[0] + "_rallies.csv"
+            rally.save_csv(data["rallies"], data["fps"], csv_path, a.start, a.names or ["P1", "P2"])
+            print("saved", ev["out"], "/", csv_path)
 
 
 def _self_check():

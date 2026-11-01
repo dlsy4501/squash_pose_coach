@@ -11,6 +11,7 @@ import time
 import cv2
 import gradio as gr
 
+import rally
 from overlay_ui import PLAYER_COLORS, court_diagram
 from track_overlay import CALIB_POINTS, homography_from_pairs, postprocess, process_video, render
 
@@ -160,7 +161,9 @@ def run(path, pts, name1, name2, start, dur):
             data = ev["analysis"]
             apath = os.path.join(OUT_DIR, f"분석_{stamp}.json")
             json.dump(data, open(apath, "w", encoding="utf-8"))
-            yield (f"✅ 완료! ({(time.time() - t0) / 60:.1f}분 걸림) 영상은 `outputs` 폴더에도 저장돼 있어요.",
+            rally.save_csv(data["rallies"], data["fps"], os.path.join(OUT_DIR, f"분석_{stamp}_랠리.csv"),
+                          float(start or 0), names)
+            yield (f"✅ 완료! ({(time.time() - t0) / 60:.1f}분 걸림) 영상과 랠리 기록(csv)은 `outputs` 폴더에도 저장돼 있어요.",
                    last, ev["out"], summary_md(ev["summary"], ball is not None), ev["out"],
                    rally_rows(data, names), apath)
             return
@@ -178,7 +181,10 @@ def rerender(apath, rows, name1, name2):
     names = _names(name1, name2)
     data = json.load(open(apath, encoding="utf-8"))
     postprocess(data, parse_overrides(rows, names))
-    out = apath.replace(".json", f"_정정{time.strftime('%H%M%S')}.mp4")
+    stamp = time.strftime("%H%M%S")
+    out = apath.replace(".json", f"_정정{stamp}.mp4")
+    rally.save_csv(data["rallies"], data["fps"], apath.replace(".json", f"_정정{stamp}_랠리.csv"),
+                  data["start"], names)
     last = None
     for ev in render(data, out, names):
         if ev.get("done"):

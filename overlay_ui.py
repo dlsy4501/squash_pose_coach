@@ -212,14 +212,14 @@ class Overlay:
                 self._text(d, (x, y), p["name"][:1], self.f_xs, (10, 14, 22), anchor="mm", bold=True)
 
     def _ball(self, d, b):
-        """공의 최근 궤적(꼬리가 옅어지는 선)과 현재 위치."""
+        """공의 최근 궤적(꼬리가 옅어지는 선)과 현재 위치. 공을 가리지 않도록 옅게 그린다."""
         s = self.s
         tr = b["trail"]
         for i in range(1, len(tr)):
-            d.line((tr[i - 1], tr[i]), fill=(255, 235, 90, int(40 + 190 * i / len(tr))), width=max(1, int(5 * s)))
+            d.line((tr[i - 1], tr[i]), fill=(255, 235, 90, int(20 + 90 * i / len(tr))), width=max(1, int(3 * s)))
         if b["now"]:
             x, y = tr[-1]
-            for r, a in ((18, 50), (12, 120), (7, 255)):
+            for r, a in ((14, 25), (9, 55), (5, 110)):
                 d.ellipse((x - r * s, y - r * s, x + r * s, y + r * s), fill=(255, 235, 90, a))
 
     # ---- 진입점 ----
