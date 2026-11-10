@@ -109,7 +109,7 @@ class Overlay:
                       outline=with_alpha(col, a), width=max(1, int(wd * s)))
 
         label = p["name"]
-        sub = f'{p["speed"]:.1f} m/s' if self.calibrated else None
+        sub = f'{"" if self.calibrated else "≈"}{p["speed"]:.1f} m/s'
         tw = max(d.textlength(label, font=self.f_md), d.textlength(sub or "", font=self.f_xs))
         w_, h_ = tw + 40 * s, (62 if sub else 42) * s
         cx = (x1 + x2) / 2
@@ -175,13 +175,13 @@ class Overlay:
         x0, y0 = 28 * s, H - 28 * s - ph
         self._panel(d, (x0, y0, x0 + pw, y0 + ph))
         self._text(d, (x0 + 22 * s, y0 + 16 * s), "DISTANCE COVERED", self.f_sm, bold=True)
-        self._text(d, (x0 + 22 * s, y0 + 40 * s), "코트 위 추정 이동 거리", self.f_xs, MUTED)
+        self._text(d, (x0 + 22 * s, y0 + 40 * s), "코트 위 추정 이동 거리" if self.calibrated else "화면 기준 대략값 (코트 보정 시 정확)", self.f_xs, MUTED)
         top = max([p["dist"] for p in P] + [1.0])
         for i, p in enumerate(P):
             ry = y0 + 70 * s + i * row
             d.ellipse((x0 + 22 * s, ry + 8 * s, x0 + 36 * s, ry + 22 * s), fill=with_alpha(p["color"], 255))
             self._text(d, (x0 + 48 * s, ry + 4 * s), p["name"], self.f_sm, bold=True)
-            self._text(d, (x0 + pw - 22 * s, ry + 4 * s), f'{p["dist"]:.1f} m', self.f_md, anchor="ra", bold=True)
+            self._text(d, (x0 + pw - 22 * s, ry + 4 * s), f'{"" if self.calibrated else "≈"}{p["dist"]:.1f} m', self.f_md, anchor="ra", bold=True)
             bx0, bx1, by = x0 + 22 * s, x0 + pw - 22 * s, ry + 34 * s
             d.rounded_rectangle((bx0, by, bx1, by + 5 * s), 3 * s, fill=(255, 255, 255, 30))
             d.rounded_rectangle((bx0, by, bx0 + max(4, (bx1 - bx0) * p["dist"] / top), by + 5 * s), 3 * s,
@@ -236,9 +236,10 @@ class Overlay:
         self._scoreboard(d, W, st)
         if st.get("banner"):
             self._banner(d, W, st["banner"])
-        if self.calibrated and st["players"]:
+        if st["players"]:
             self._distance(d, H, st["players"])
-            self._map(d, W, H, st["players"])
+            if self.calibrated:
+                self._map(d, W, H, st["players"])
         base = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
         out = np.asarray(Image.alpha_composite(base, layer).convert("RGB"))
         return cv2.cvtColor(out, cv2.COLOR_RGB2BGR)

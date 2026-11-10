@@ -11,7 +11,7 @@ import time
 import cv2
 import gradio as gr
 
-import rally
+import report
 from overlay_ui import PLAYER_COLORS, court_diagram
 from track_overlay import CALIB_POINTS, homography_from_pairs, postprocess, process_video, render
 
@@ -108,7 +108,7 @@ def on_reset(path, t):
 def summary_md(summary, ball_used):
     rows = ["| 선수 | 득점 | 타격 횟수(추정) | 이동 거리 |", "|---|---|---|---|"]
     for s in summary:
-        d = f'{s["dist"]:.1f} m' if s["dist"] is not None else "— (코트 보정 안 함)"
+        d = f'{"≈" if s.get("dist_estimated") else ""}{s["dist"]:.1f} m'
         rows.append(f'| {s["name"]} | {s["points"]} | {s["shots"]}회 | {d} |')
     note = ("공 모델을 사용해 타격을 보정했어요." if ball_used else
             "공 모델이 없어서 손목 움직임만으로 타격을 셌어요 (연습 스윙이 섞일 수 있어요).")
@@ -161,9 +161,8 @@ def run(path, pts, name1, name2, start, dur):
             data = ev["analysis"]
             apath = os.path.join(OUT_DIR, f"분석_{stamp}.json")
             json.dump(data, open(apath, "w", encoding="utf-8"))
-            rally.save_csv(data["rallies"], data["fps"], os.path.join(OUT_DIR, f"분석_{stamp}_랠리.csv"),
-                          float(start or 0), names)
-            yield (f"✅ 완료! ({(time.time() - t0) / 60:.1f}분 걸림) 영상과 랠리 기록(csv)은 `outputs` 폴더에도 저장돼 있어요.",
+            report.save_all(data, names, os.path.join(OUT_DIR, f"분석_{stamp}"))
+            yield (f"✅ 완료! ({(time.time() - t0) / 60:.1f}분 걸림) 영상과 요약 리포트(html·csv)는 `outputs` 폴더에도 저장돼 있어요.",
                    last, ev["out"], summary_md(ev["summary"], ball is not None), ev["out"],
                    rally_rows(data, names), apath)
             return
@@ -183,8 +182,7 @@ def rerender(apath, rows, name1, name2):
     postprocess(data, parse_overrides(rows, names))
     stamp = time.strftime("%H%M%S")
     out = apath.replace(".json", f"_정정{stamp}.mp4")
-    rally.save_csv(data["rallies"], data["fps"], apath.replace(".json", f"_정정{stamp}_랠리.csv"),
-                  data["start"], names)
+    report.save_all(data, names, apath.replace(".json", f"_정정{stamp}"))
     last = None
     for ev in render(data, out, names):
         if ev.get("done"):
@@ -193,6 +191,17 @@ def rerender(apath, rows, name1, name2):
             return
         last = cv2.cvtColor(ev["frame"], cv2.COLOR_BGR2RGB)
         yield f"영상 다시 만드는 중... **{ev['progress'] * 100:.0f}%**", last, None, "", None, gr.update()
+
+
+def show_report(apath):
+    """가장 최근에 만든 리포트(html)를 화면에 넣을 iframe과 다운로드 파일로 돌려준다."""
+    import glob
+    import html as _h
+    files = sorted(glob.glob(apath[:-len(".json")] + "*_리포트.html"), key=os.path.getmtime) if apath else []
+    if not files:
+        return "", None
+    page = open(files[-1], encoding="utf-8").read()
+    return f'<iframe srcdoc="{_h.escape(page)}" style="width:100%;height:1100px;border:0;border-radius:12px"></iframe>', files[-1]
 
 
 def build():
@@ -239,14 +248,20 @@ def build():
                                col_count=(4, "fixed"), interactive=True, label="랠리 목록")
         redo = gr.Button("점수 반영해서 영상 다시 만들기")
         download = gr.File(label="결과 영상 다운로드")
+        gr.Markdown("### ⑤ 경기 요약 리포트\n선수별 이동 거리·타격·득점, 점수 변화, 랠리별 기록을 그림으로 보여 줘요. "
+                    "같은 내용이 csv로도 `outputs`에 저장됩니다.")
+        report_view = gr.HTML()
+        report_file = gr.File(label="리포트 다운로드 (html)")
 
         path.change(on_upload, path, [t, frame, pts, choice, info, status])
         t.release(on_seek, [path, t, pts], frame)
         frame.select(on_click, [path, t, pts, choice], [frame, pts, choice, status])
         skip.click(on_skip, [pts, choice], choice)
         reset.click(on_reset, [path, t], [frame, pts, choice, status])
-        go.click(run, [path, pts, n1, n2, start, dur], [state_md, preview, result, table, download, rallies, apath])
-        redo.click(rerender, [apath, rallies, n1, n2], [state_md, preview, result, table, download, rallies])
+        go.click(run, [path, pts, n1, n2, start, dur], [state_md, preview, result, table, download, rallies, apath]
+                 ).then(show_report, apath, [report_view, report_file])
+        redo.click(rerender, [apath, rallies, n1, n2], [state_md, preview, result, table, download, rallies]
+                  ).then(show_report, apath, [report_view, report_file])
     return ui
 
 

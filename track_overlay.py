@@ -16,7 +16,6 @@ import subprocess
 
 from ball_track import assign_hits, find_turns, interpolate, merge_hits, pick_track, remove_spikes
 from overlay_ui import PLAYER_COLORS, Overlay
-import rally
 from rally import apply_winners, score_at, split_rallies
 
 COURT_W, COURT_L = 6.4, 9.75  # m
@@ -27,6 +26,9 @@ SWING_SPEED = 10.0  # 손목 속도(몸통길이/초, 3프레임 평균) 이 이
 MIN_SHOT_GAP_S = 0.7
 PEAK_LAG = 2       # 피크 확인에 쓰는 이후 프레임 수 (실시간 판정 지연)
 MAX_PLAYERS = 2
+PLAYER_HEIGHT_M = 1.7  # 보정 없을 때 이동 거리 환산용 (박스 높이 = 키)
+APP_UPDATE_MAX, APP_EMA = 0.4, 0.05  # 옷 색 기억은 비슷한 때만, 천천히 갱신 (잘못 섞이면 영영 바뀌므로)
+W_APP, W_POS, ID_BONUS = 0.4, 0.6, 0.1  # 슬롯 배정 비용: 옷 색 / 위치 / 트래커 ID가 같으면 깎아주는 값
 BANNER_S = 0.9     # 타격 배너가 떠 있는 시간
 
 # 보정 때 사용자가 클릭할 점들 (설명, 코트 좌표 m). 앞벽 왼쪽 바닥 모서리가 (0,0), x는 오른쪽, y는 뒤쪽.
@@ -81,12 +83,13 @@ class Mover:
         self.shots.append(t)
         return True
 
-    def update(self, p, fps=30):
+    def update(self, p, fps=30, scale=1.0):
+        """scale: 좌표 단위 -> m 변환(보정 없을 때 화면 픽셀을 선수 키로 환산). 보정 있으면 1."""
         if self.pos is None:
             self.pos = p
         else:
             q = (self.pos[0] + EMA * (p[0] - self.pos[0]), self.pos[1] + EMA * (p[1] - self.pos[1]))
-            step = math.dist(q, self.pos)
+            step = math.dist(q, self.pos) * scale
             if step < self.max_step:
                 self.dist += step
                 self.speed += EMA * (step * fps - self.speed)
@@ -128,6 +131,75 @@ def in_court(c, margin=1.0):
     return -margin <= c[0] <= COURT_W + margin and -margin <= c[1] <= COURT_L + margin
 
 
+def _iou(a, b):
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    inter = max(0.0, w) * max(0.0, h)
+    return inter / max((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter, 1e-6)
+
+
+def _grow(b, r=0.2):
+    """박스를 좌우로 r배 넓힌다 (바로 옆에 붙은 선수의 옷이 섞이는지 볼 때)."""
+    w = (b[2] - b[0]) * r
+    return (b[0] - w, b[1], b[2] + w, b[3])
+
+
+def appearance(frame, xy, cf, box):
+    """선수의 옷 색 특징: 상의(어깨~골반)와 하의(골반~발) 영역의 HSV 히스토그램을 이어 붙인 벡터."""
+    import cv2
+    import numpy as np
+    x1, y1, x2, y2 = (int(v) for v in box)
+    ok = lambda ids: all(cf[i] > 0.3 for i in ids)
+    if ok((5, 6, 11, 12)):
+        sy, hy = (xy[5][1] + xy[6][1]) / 2, (xy[11][1] + xy[12][1]) / 2
+        xs = [xy[i][0] for i in (5, 6, 11, 12)]
+        ux1, ux2 = min(xs), max(xs)
+    else:  # 키포인트가 불안하면 박스 비율로 대체
+        h = y2 - y1
+        sy, hy, ux1, ux2 = y1 + 0.2 * h, y1 + 0.5 * h, x1 + 0.2 * (x2 - x1), x2 - 0.2 * (x2 - x1)
+    ey = y2 - 0.05 * (y2 - y1)
+    parts = []
+    for ya, yb in ((sy, hy), (hy, ey)):
+        a, b, c, d = int(max(0, ya)), int(max(0, yb)), int(max(0, ux1)), int(max(0, ux2))
+        crop = frame[a:b, c:d]
+        if crop.size < 30:
+            parts.append(np.zeros(108, np.float32))
+            continue
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        h = cv2.calcHist([hsv], [0, 1, 2], None, [12, 3, 3], [0, 180, 0, 256, 0, 256]).flatten()
+        parts.append((h / max(h.sum(), 1e-6)).astype(np.float32))
+    return parts
+
+
+def appearance_dist(a, b):
+    """두 옷 색 특징의 거리(0~1). 상의/하의 Bhattacharyya 거리의 평균."""
+    import cv2
+    return sum(cv2.compareHist(x, y, cv2.HISTCMP_BHATTACHARYYA) for x, y in zip(a, b)) / 2
+
+
+def assign_slots(dets, slots, id_slot, box_h):
+    """이번 프레임 검출(dets)을 선수 슬롯에 배정한다. dets: [{pid, foot, app}], slots: {슬롯: {foot, app}}.
+    트래커 ID만 믿으면 두 선수가 겹쳤다 떨어질 때 바뀌므로, 옷 색+위치+(같은 ID면 보너스)의 비용이 최소인 조합을 고른다.
+    반환: {검출 인덱스: 슬롯}. 슬롯보다 검출이 많으면 비용이 가장 낮은 쪽만 배정된다."""
+    from itertools import permutations
+    keys = list(slots)
+    if len(dets) <= len(keys):  # 검출이 적으면 어느 슬롯에 넣을지가 선택지
+        options = [list(zip(range(len(dets)), ks)) for ks in permutations(keys, len(dets))]
+    else:
+        options = [list(zip(ds, keys)) for ds in permutations(range(len(dets)), len(keys))]
+    best, best_cost = {}, 1e9
+    for pairs in options:
+        cost = 0.0
+        for d, k in pairs:
+            sl, dt = slots[k], dets[d]
+            app = appearance_dist(sl["app"], dt["app"]) if sl["app"] is not None else 0.5
+            pos = min(1.0, math.dist(sl["foot"], dt["foot"]) / max(box_h, 1.0))
+            cost += W_APP * app + W_POS * pos - (ID_BONUS if id_slot.get(dt["pid"]) == k else 0)
+        if cost < best_cost:
+            best, best_cost = dict(pairs), cost
+    return best
+
+
 def _encode(raw, src, start, seconds, out):
     """OpenCV가 쓴 mp4v(브라우저/휴대폰에서 재생 안 될 수 있음)를 H.264로 바꾸고 원본 소리를 붙인다."""
     import imageio_ffmpeg
@@ -167,7 +239,8 @@ def analyze(video, H=None, start=0.0, seconds=None, ball_model=None, model_path=
     n_frames = min(int(seconds * fps) if seconds else total, total - int(start * fps))
     size = (int(cap.get(3)), int(cap.get(4)))
 
-    movers, order, alias = {}, [], {}  # alias: 트래커 ID -> 선수 슬롯. order: 슬롯(처음 등장한 순서 = P1, P2)
+    movers, order, id_slot = {}, [], {}  # id_slot: 트래커 ID -> 마지막으로 배정된 슬롯(힌트일 뿐). order: 슬롯(처음 등장한 순서 = P1, P2)
+    slot_state = {}  # 슬롯 -> {foot, app}: 마지막 위치와 옷 색(겹치지 않았을 때만 갱신)
     frames, swing_hits = [], []
     for fi in range(n_frames):
         ok, frame = cap.read()
@@ -185,28 +258,37 @@ def analyze(video, H=None, start=0.0, seconds=None, ball_model=None, model_path=
                 area = (box[2] - box[0]) * (box[3] - box[1])
                 cands.append((area, box, pid, xy, cf, foot, court))
         cands.sort(key=lambda c: -c[0])  # 큰(가까운) 사람 우선
+        cands = cands[:MAX_PLAYERS]
+
+        dets = [dict(pid=c[2], foot=c[5], app=appearance(frame, c[3], c[4], c[1])) for c in cands]
+        # 두 박스가 겹치면 옷 색이 섞이므로 그 프레임의 색은 기억에 반영하지 않는다
+        apart = len(cands) < 2 or _iou(_grow(cands[0][1]), _grow(cands[1][1])) == 0
+        chosen = assign_slots(dets, slot_state, id_slot, max([c[1][3] - c[1][1] for c in cands] or [1])) if slot_state else {}
+        for di in range(len(cands)):  # 아직 슬롯이 모자라면 새 선수
+            if di not in chosen and len(order) < MAX_PLAYERS:
+                k = len(order)
+                order.append(k)
+                movers[k] = Mover(MAX_STEP_M if H is not None else 1e9)
+                slot_state[k] = dict(foot=dets[di]["foot"], app=None)
+                chosen[di] = k
 
         seen = {}
-        for _, box, pid, xy, cf, foot, court in cands[:MAX_PLAYERS]:
-            if pid not in alias:
-                if len(order) < MAX_PLAYERS:
-                    alias[pid] = pid
-                    movers[pid] = Mover(MAX_STEP_M if H is not None else 1e9)
-                    order.append(pid)
-                else:  # 트래커가 ID를 새로 줬을 때: 지금 안 보이는 선수 중 마지막 위치가 가장 가까운 슬롯에 잇는다
-                    free = [q for q in order if q not in seen]
-                    if not free:
-                        continue
-                    alias[pid] = min(free, key=lambda q: math.dist(movers[q].pos, court))
-            slot = alias[pid]
-            if slot in seen:
-                continue
+        for di, slot in chosen.items():
+            _, box, pid, xy, cf, foot, court = cands[di]
+            id_slot[pid] = slot
+            st_ = slot_state[slot]
+            if st_["app"] is None:
+                st_["app"] = dets[di]["app"] if apart else None
+            elif apart and appearance_dist(st_["app"], dets[di]["app"]) < APP_UPDATE_MAX:  # 확실히 같은 사람일 때만 갱신
+                st_["app"] = [(1 - APP_EMA) * a + APP_EMA * b for a, b in zip(st_["app"], dets[di]["app"])]
+            st_["foot"] = foot
             m = movers[slot]
-            m.update(court, fps)
+            scale = 1.0 if H is not None else PLAYER_HEIGHT_M / max(box[3] - box[1], 1.0)
+            m.update(court, fps, scale)
             wr = [list(xy[i]) for i in (9, 10) if cf[i] > 0.3]
             seen[slot] = dict(v=1, box=box, foot=list(foot), pos=list(m.pos), dist=m.dist, speed=m.speed, w=wr)
             if m.detect_shot(fi, m.swing_speed(xy, cf, fps), fps):
-                swing_hits.append(dict(frame=fi - PEAK_LAG, slot=order.index(slot)))
+                swing_hits.append(dict(frame=fi - PEAK_LAG, slot=slot))
         players = []
         for slot in order:
             m = movers[slot]
@@ -283,7 +365,7 @@ def render(data, out, names=None):
     cap.release()
     _encode(raw, data["video"], start, len(frames) / fps, out)
     last = lambda k: next(f["p"][k] for f in reversed(frames) if len(f["p"]) > k)
-    summary = [dict(name=name_of(k), dist=last(k)["dist"] if data["calibrated"] else None,
+    summary = [dict(name=name_of(k), dist=last(k)["dist"], dist_estimated=not data["calibrated"],
                     shots=sum(h["slot"] == k for h in hits),
                     points=score_at(rallies, 10**9, fps)[k] if rallies else 0) for k in range(n_slots)]
     yield {"done": True, "out": out, "summary": summary}
@@ -321,12 +403,11 @@ def main():
     for ev in process_video(a.video, a.out, H, a.start, a.seconds, a.names, a.ball_model):
         if ev.get("done"):
             for s in ev["summary"]:
-                dist = f'{s["dist"]:.1f} m, ' if s["dist"] is not None else ""
+                dist = f'{"≈" if s["dist_estimated"] else ""}{s["dist"]:.1f} m, '
                 print(f'{s["name"]}: {dist}타격 {s["shots"]}회, 득점 {s["points"]}')
             data = ev["analysis"]
-            csv_path = os.path.splitext(a.out)[0] + "_rallies.csv"
-            rally.save_csv(data["rallies"], data["fps"], csv_path, a.start, a.names or ["P1", "P2"])
-            print("saved", ev["out"], "/", csv_path)
+            import report
+            print("saved", ev["out"], "/", report.save_all(data, a.names or ["P1", "P2"], os.path.splitext(a.out)[0]))
 
 
 def _self_check():
@@ -359,6 +440,24 @@ def _self_check():
     seq = [0, 0, 10, 30, 40, 30, 10, 0, 0, 0, 0, 40, 60, 40, 0, 0, 0]
     hits = [m.detect_shot(i, v, 30) for i, v in enumerate(seq)]
     assert sum(hits) == 1 and 3 <= m.shots[0] <= 6, m.shots
+    # 슬롯 배정: 옷 색이 다르면 트래커 ID가 서로 바뀌어도 원래 선수에게 돌려준다
+    import numpy as np
+    img = np.zeros((200, 100, 3), np.uint8)
+    xy = [(30, 50)] * 17
+    xy[5], xy[6], xy[11], xy[12] = (20, 50), (80, 50), (25, 100), (75, 100)
+    cf = [1.0] * 17
+
+    def person(shirt, shorts):
+        f = img.copy()
+        f[50:100] = shirt
+        f[100:190] = shorts
+        return appearance(f, xy, cf, (0, 20, 100, 200))
+
+    red, blue = person((0, 0, 255), (40, 40, 40)), person((255, 0, 0), (200, 200, 200))
+    slots = {0: dict(foot=(100, 500), app=red), 1: dict(foot=(110, 500), app=blue)}
+    dets = [dict(pid=7, foot=(105, 500), app=blue), dict(pid=8, foot=(104, 500), app=red)]  # 위치는 거의 같음
+    assert assign_slots(dets, slots, {7: 0, 8: 1}, 200) == {0: 1, 1: 0}  # ID는 바뀌었어도 색으로 복구
+    assert assign_slots(dets[:1], slots, {7: 0}, 200) == {0: 1}  # 한 명만 보여도 옷 색이 맞는 슬롯으로
     print("self-check OK")
 
 
