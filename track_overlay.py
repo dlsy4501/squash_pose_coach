@@ -14,6 +14,8 @@ import math
 import os
 import subprocess
 
+import numpy as np
+
 from ball_track import assign_hits, find_turns, interpolate, merge_hits, pick_track, remove_spikes
 from overlay_ui import PLAYER_COLORS, Overlay
 from rally import apply_winners, score_at, split_rallies
@@ -115,7 +117,7 @@ def load_homography(path):
 
 def to_court(H, xy):
     x, y = xy
-    v = H @ [x, y, 1.0]
+    v = np.asarray(H) @ [x, y, 1.0]
     return (float(v[0] / v[2]), float(v[1] / v[2]))
 
 
@@ -301,8 +303,24 @@ def analyze(video, H=None, start=0.0, seconds=None, ball_model=None, model_path=
                               (80, 255, 80), 3)
             yield {"progress": fi / n_frames, "frame": cv2.resize(prev, None, fx=0.5, fy=0.5)}
     cap.release()
-    yield {"analysis": dict(video=video, start=start, fps=fps, size=list(size), calibrated=H is not None,
+    yield {"analysis": dict(video=video, start=start, fps=fps, size=list(size), calibrated=H is not None, H=H.tolist() if H is not None else None,
                             has_ball=bool(ball), frames=frames, swing_hits=swing_hits)}
+
+
+def apply_calibration(data, H):
+    """이미 분석한 결과(data)에 코트 보정(호모그래피 H)을 뒤늦게 적용한다: 발 위치로 코트 좌표/이동 거리/속도를 다시 계산.
+    분석을 다시 돌리지 않아도 코트맵과 거리를 얻는다. (분석 때의 코트 밖 사람 걸러내기는 안 한 상태다)"""
+    fps = data["fps"]
+    movers = {}
+    for f in data["frames"]:
+        for k, p in enumerate(f["p"]):
+            m = movers.setdefault(k, Mover(MAX_STEP_M))
+            if p["v"]:
+                m.update(to_court(H, p["foot"]), fps)
+            if m.pos is not None:
+                p["pos"], p["dist"], p["speed"] = list(m.pos), m.dist, m.speed if p["v"] else 0.0
+    data["calibrated"], data["H"] = True, [list(map(float, r)) for r in H]
+    return data
 
 
 def postprocess(data, overrides=None):
@@ -356,6 +374,8 @@ def render(data, out, names=None):
                                 speed=p["speed"], trail=trails[k], visible=bool(p["v"])))
         tail = [(q["x"], q["y"]) for q in points[max(0, fi - 9):fi + 1] if q]
         ball = dict(trail=tail, now=points[fi] is not None) if tail else None
+        if ball and data.get("H"):  # 코트맵용: 공의 화면 위치를 바닥 평면 좌표로 (높이 뜬 공은 코트 밖으로 계산되므로 그 점은 맵에 안 그린다)
+            ball["court"] = [c if in_court(c, 0.5) else None for c in (to_court(data["H"], q) for q in tail)][-10:]
         score = score_at(rallies, fi, fps) if rallies else None
         writer.write(overlay.render(frame, dict(t=start + fi / fps, players=players, banner=banner, ball=ball, score=score)))
         if fi % 15 == 0:

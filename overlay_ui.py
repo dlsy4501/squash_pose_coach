@@ -187,7 +187,7 @@ class Overlay:
             d.rounded_rectangle((bx0, by, bx0 + max(4, (bx1 - bx0) * p["dist"] / top), by + 5 * s), 3 * s,
                                 fill=with_alpha(p["color"], 255))
 
-    def _map(self, d, W, H, P):
+    def _map(self, d, W, H, P, ball=None):
         s = self.s
         cw = 230 * s
         ch = cw * COURT_L / COURT_W
@@ -210,6 +210,15 @@ class Overlay:
                 d.ellipse((x - r, y - r, x + r, y + r), fill=with_alpha(p["color"], 255),
                           outline=(255, 255, 255, 255), width=max(1, int(2 * s)))
                 self._text(d, (x, y), p["name"][:1], self.f_xs, (10, 14, 22), anchor="mm", bold=True)
+        if ball and ball.get("court"):  # 공: 바닥 기준 위치(공이 높이 떠 있으면 실제와 다를 수 있어 작게 표시)
+            tr = [pt(q) if q else None for q in ball["court"]]
+            for i in range(1, len(tr)):
+                if tr[i - 1] and tr[i]:
+                    d.line((tr[i - 1], tr[i]), fill=(255, 235, 90, int(40 + 140 * i / len(tr))), width=max(1, int(2 * s)))
+            if ball["now"] and tr[-1]:
+                x, y = tr[-1]
+                r = 5 * s
+                d.ellipse((x - r, y - r, x + r, y + r), fill=(255, 235, 90, 255), outline=(20, 20, 20, 255), width=1)
 
     def _ball(self, d, b):
         """공의 최근 궤적(꼬리가 옅어지는 선)과 현재 위치. 공을 가리지 않도록 옅게 그린다."""
@@ -239,7 +248,7 @@ class Overlay:
         if st["players"]:
             self._distance(d, H, st["players"])
             if self.calibrated:
-                self._map(d, W, H, st["players"])
+                self._map(d, W, H, st["players"], st.get("ball"))
         base = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
         out = np.asarray(Image.alpha_composite(base, layer).convert("RGB"))
         return cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
@@ -260,6 +269,9 @@ def _self_check():
     out2 = Overlay(1080, ["민수", "지훈"], True).render(frame, st2)
     assert (out2[440:520, 880:1020] != out[440:520, 880:1020]).any()
     # 보정 안 한 영상: 코트맵/거리 패널 없이도 에러 없이 그려져야 함
+    st3 = dict(st2, ball=dict(st2["ball"], court=[(3.0, 5.0), None, (3.5, 6.0)]))
+    out3 = Overlay(1080, ["민수", "지훈"], True).render(frame, st3)
+    assert (out3 != out2).any()  # 코트맵에 공이 추가로 그려진다
     Overlay(720, ["A", "B"], False).render(cv2.resize(frame, (1280, 720)), dict(st, players=[p(0)]))
     assert court_diagram([(0, 0), (3.2, 5.44)]).shape[2] == 3
     assert fmt_time(144.4) == "02:24"

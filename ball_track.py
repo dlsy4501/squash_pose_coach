@@ -11,9 +11,10 @@ ponytail: 임계값은 전부 경험치. 실제 공 모델 결과로 튜닝 필�
 import math
 
 MIN_CONF = 0.25
-MAX_SPEED = 260     # px/frame: 한 프레임에 이보다 멀리 가면 같은 공으로 보지 않는다
+MAX_SPEED = 120     # px/frame: 한 프레임에 이보다 멀리 가면 같은 공으로 보지 않는다 (실측: 공 호는 프레임당 10~60px)
+MIN_RUN = 5         # 이보다 짧게 이어진 점들은 공이 아니라 오검출(선수 몸, 라켓)로 보고 버린다
 RESET_GAP = 10      # 이 프레임 이상 못 보면 이전 위치 제약을 푼다
-OUT_PX = 120        # 직선 보간값에서 이만큼 벗어나면 튀는 점 후보
+OUT_PX = 80         # 직선 보간값에서 이만큼 벗어나면 튀는 점 후보
 INTERP_GAP = 5      # 이 프레임 이하의 빈 구간만 보간
 TURN_DEG = 50       # 이 각도 이상 꺾이면 방향 급변
 TURN_MIN_SPEED = 6  # px/frame: 이보다 느리면 방향이 의미 없다
@@ -23,17 +24,35 @@ CONFIRM_WIN = 6     # 스윙 타격을 공 정보로 검증할 때 보는 앞뒤
 
 def pick_track(cands_per_frame, scale=1.0):
     """프레임별 후보 [(x, y, conf), ...] -> 프레임별 한 점 또는 None.
-    직전 공 위치에서 한 프레임에 갈 수 있는 거리 안의 후보만 인정하고 그중 conf가 최대인 것을 고른다."""
+    직전 공 위치에서 한 프레임에 갈 수 있는 거리 안의 후보 중, 가깝고 conf 높은 것을 고른다.
+    그 뒤 MIN_RUN개 미만으로 짧게 이어진 조각은 오검출로 버린다."""
     track, prev, prev_i = [None] * len(cands_per_frame), None, None
     for i, cands in enumerate(cands_per_frame):
         cands = [c for c in cands if c[2] >= MIN_CONF]
+        lim = None
         if prev is not None and i - prev_i <= RESET_GAP:
             lim = MAX_SPEED * scale * (i - prev_i)
             cands = [c for c in cands if math.dist(c[:2], prev[:2]) <= lim]
         if cands:
-            track[i] = prev = max(cands, key=lambda c: c[2])
+            near = (lambda c: math.dist(c[:2], prev[:2]) / lim) if lim else (lambda c: 0.0)
+            track[i] = prev = max(cands, key=lambda c: c[2] - 0.5 * near(c))
             prev_i = i
-    return track
+    return _drop_short_runs(track)
+
+
+def _drop_short_runs(track, max_gap=3):
+    """빈 구간이 max_gap 프레임 이하로 이어진 점들을 한 조각으로 묶어, MIN_RUN개 미만인 조각은 지운다."""
+    idx = [i for i, p in enumerate(track) if p]
+    out, run = list(track), []
+    for i in idx + [None]:
+        if run and (i is None or i - run[-1] > max_gap + 1):
+            if len(run) < MIN_RUN:
+                for j in run:
+                    out[j] = None
+            run = []
+        if i is not None:
+            run.append(i)
+    return out
 
 
 def _neighbors(track, i, span):
@@ -159,15 +178,15 @@ def _self_check():
         x = 100 + 30 * i if i <= 20 else 100 + 30 * 20 - 30 * (i - 20)
         cands.append([(x, 400, 0.9)])
     cands[7] = [(900, 50, 0.8), (100 + 30 * 7, 400, 0.6)]   # 먼 곳의 가짜 후보가 conf가 더 높다
-    cands[12] = [(460, 600, 0.7)]                            # 이동 거리는 가능하지만 직선에서 벗어난 가짜 점
-    cands[13] = cands[14] = []                               # 누락
+    cands[12] = [(460, 500, 0.7)]                            # 이동 거리는 가능하지만 직선에서 벗어난 가짜 점
+    cands[16] = cands[17] = []                               # 누락
     tr = pick_track(cands)
     assert tr[7][:2] == (310, 400), tr[7]                    # 연속성으로 진짜를 고름
     assert tr[12] is not None                                # 연속성 검사는 통과해서 남아 있음
     tr = remove_spikes(tr)
     assert tr[12] is None                                    # 튀는 점 제거
     pts = interpolate(tr)
-    assert all(p is not None for p in pts[10:16]) and pts[13]["interp"] and abs(pts[13]["x"] - 490) < 1
+    assert all(p is not None for p in pts[10:20]) and pts[16]["interp"] and abs(pts[16]["x"] - 580) < 1
     turns = find_turns(pts)
     assert len(turns) == 1 and abs(turns[0]["frame"] - 20) <= 1, turns
 
