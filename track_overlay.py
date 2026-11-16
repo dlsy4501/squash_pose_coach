@@ -32,6 +32,7 @@ PLAYER_HEIGHT_M = 1.7  # 보정 없을 때 이동 거리 환산용 (박스 높�
 APP_UPDATE_MAX, APP_EMA = 0.4, 0.05  # 옷 색 기억은 비슷한 때만, 천천히 갱신 (잘못 섞이면 영영 바뀌므로)
 W_APP, W_POS, ID_BONUS = 0.4, 0.6, 0.1  # 슬롯 배정 비용: 옷 색 / 위치 / 트래커 ID가 같으면 깎아주는 값
 BANNER_S = 0.9     # 타격 배너가 떠 있는 시간
+KP_IDX = (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)  # 스윙 지표용으로 같이 저장할 관절(어깨/팔꿈치/손목/엉덩이/무릎/발목)
 
 # 보정 때 사용자가 클릭할 점들 (설명, 코트 좌표 m). 앞벽 왼쪽 바닥 모서리가 (0,0), x는 오른쪽, y는 뒤쪽.
 CALIB_POINTS = [
@@ -147,36 +148,39 @@ def _grow(b, r=0.2):
 
 
 def appearance(frame, xy, cf, box):
-    """선수의 옷 색 특징: 상의(어깨~골반)와 하의(골반~발) 영역의 HSV 히스토그램을 이어 붙인 벡터."""
+    """선수의 옷 색 특징: 상의(어깨~골반)와 하의(골반~발) 영역 HSV의 중앙값 [상의 V, S, S*cos(색조), S*sin(색조), 하의 같은 4개] (0~1).
+    색 히스토그램은 같은 사람도 포즈/조명에 따라 크게 변해 둘을 가르지 못했고, 중앙값 밝기는 훨씬 안정적이었다."""
     import cv2
-    import numpy as np
     x1, y1, x2, y2 = (int(v) for v in box)
-    ok = lambda ids: all(cf[i] > 0.3 for i in ids)
-    if ok((5, 6, 11, 12)):
+    if all(cf[i] > 0.3 for i in (5, 6, 11, 12)):
         sy, hy = (xy[5][1] + xy[6][1]) / 2, (xy[11][1] + xy[12][1]) / 2
         xs = [xy[i][0] for i in (5, 6, 11, 12)]
         ux1, ux2 = min(xs), max(xs)
+        w = 0.15 * (ux2 - ux1)  # 팔/배경이 섞이지 않게 좌우를 조금 줄인다
+        ux1, ux2 = ux1 + w, ux2 - w
     else:  # 키포인트가 불안하면 박스 비율로 대체
         h = y2 - y1
-        sy, hy, ux1, ux2 = y1 + 0.2 * h, y1 + 0.5 * h, x1 + 0.2 * (x2 - x1), x2 - 0.2 * (x2 - x1)
+        sy, hy, ux1, ux2 = y1 + 0.2 * h, y1 + 0.5 * h, x1 + 0.25 * (x2 - x1), x2 - 0.25 * (x2 - x1)
     ey = y2 - 0.05 * (y2 - y1)
-    parts = []
+    out = []
     for ya, yb in ((sy, hy), (hy, ey)):
         a, b, c, d = int(max(0, ya)), int(max(0, yb)), int(max(0, ux1)), int(max(0, ux2))
         crop = frame[a:b, c:d]
         if crop.size < 30:
-            parts.append(np.zeros(108, np.float32))
+            out += [0.5, 0.5, 0.0, 0.0]
             continue
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        h = cv2.calcHist([hsv], [0, 1, 2], None, [12, 3, 3], [0, 180, 0, 256, 0, 256]).flatten()
-        parts.append((h / max(h.sum(), 1e-6)).astype(np.float32))
-    return parts
+        v, sat, hue = (float(np.median(hsv[..., i])) for i in (2, 1, 0))
+        ang = hue / 180 * 2 * math.pi  # 색조는 원이라 채도를 곱한 (cos, sin)으로: 회색은 색조가 의미 없다
+        out += [v / 255, sat / 255, sat / 255 * math.cos(ang), sat / 255 * math.sin(ang)]
+    return out
 
 
 def appearance_dist(a, b):
-    """두 옷 색 특징의 거리(0~1). 상의/하의 Bhattacharyya 거리의 평균."""
-    import cv2
-    return sum(cv2.compareHist(x, y, cv2.HISTCMP_BHATTACHARYYA) for x, y in zip(a, b)) / 2
+    """두 옷 색 특징의 거리(0~1). 상의 밝기 차이를 가장 크게 본다 (0.15 이상 차이면 다른 사람으로 본다)."""
+    up = 2 * abs(a[0] - b[0]) + abs(a[1] - b[1]) + math.dist(a[2:4], b[2:4])
+    lo = abs(a[4] - b[4]) + abs(a[5] - b[5]) + math.dist(a[6:8], b[6:8])
+    return min(1.0, (up + 0.5 * lo) / 0.5)
 
 
 def assign_slots(dets, slots, id_slot, box_h):
@@ -200,6 +204,34 @@ def assign_slots(dets, slots, id_slot, box_h):
         if cost < best_cost:
             best, best_cost = dict(pairs), cost
     return best
+
+
+class Slots:
+    """선수 슬롯(P1, P2)의 마지막 위치와 옷 색을 기억하고, 프레임마다 검출을 슬롯에 배정한다."""
+
+    def __init__(self):
+        self.state = {}    # 슬롯 -> {foot, app}
+        self.id_slot = {}  # 트래커 ID -> 마지막으로 배정된 슬롯(힌트일 뿐)
+
+    def step(self, dets, boxes):
+        """dets: [{pid, foot, app}], boxes: 같은 순서의 박스. 반환 {검출 인덱스: 슬롯}. 새 선수는 슬롯이 새로 생긴다."""
+        apart = len(boxes) < 2 or _iou(_grow(boxes[0]), _grow(boxes[1])) == 0  # 겹치면 옷 색이 섞이므로 기억에 반영 안 함
+        chosen = assign_slots(dets, self.state, self.id_slot, max([b[3] - b[1] for b in boxes] or [1])) if self.state else {}
+        for di in range(len(dets)):
+            if di not in chosen and len(self.state) < MAX_PLAYERS:
+                k = len(self.state)
+                self.state[k] = dict(foot=dets[di]["foot"], app=None)
+                chosen[di] = k
+        for di, slot in chosen.items():
+            st = self.state[slot]
+            self.id_slot[dets[di]["pid"]] = slot
+            st["foot"] = dets[di]["foot"]
+            app = dets[di]["app"]
+            if st["app"] is None:
+                st["app"] = app if apart else None
+            elif apart and appearance_dist(st["app"], app) < APP_UPDATE_MAX:  # 확실히 같은 사람일 때만 갱신
+                st["app"] = [(1 - APP_EMA) * x + APP_EMA * y for x, y in zip(st["app"], app)]
+        return chosen
 
 
 def _encode(raw, src, start, seconds, out):
@@ -227,7 +259,8 @@ def detect_ball(model, frame, imgsz, conf=0.15):
 def analyze(video, H=None, start=0.0, seconds=None, ball_model=None, model_path="yolo11n-pose.pt"):
     """1단계: 영상을 한 번 훑어 프레임별 선수/공 후보를 모은다 (그리기는 안 함, 느린 단계).
     제너레이터: {"progress", "frame"(미리보기 BGR)}를 내다가 마지막에 {"analysis": data}.
-    data["frames"][i] = {"p": [슬롯별 선수 {v, box, foot, pos, dist, speed, w}], "b": [공 후보]}"""
+    data["frames"][i] = {"p": [슬롯별 선수 {v, box, foot, pos, dist, speed, w, kp, sw}], "b": [공 후보]}
+    kp: swing_metrics.py용 관절 좌표(어깨~발목), sw: 그 프레임의 손목 스윙 속도(몸통 길이/초)"""
     import cv2
     from ultralytics import YOLO
 
@@ -241,8 +274,7 @@ def analyze(video, H=None, start=0.0, seconds=None, ball_model=None, model_path=
     n_frames = min(int(seconds * fps) if seconds else total, total - int(start * fps))
     size = (int(cap.get(3)), int(cap.get(4)))
 
-    movers, order, id_slot = {}, [], {}  # id_slot: 트래커 ID -> 마지막으로 배정된 슬롯(힌트일 뿐). order: 슬롯(처음 등장한 순서 = P1, P2)
-    slot_state = {}  # 슬롯 -> {foot, app}: 마지막 위치와 옷 색(겹치지 않았을 때만 갱신)
+    movers, order, slots = {}, [], Slots()  # order: 슬롯(처음 등장한 순서 = P1, P2)
     frames, swing_hits = [], []
     for fi in range(n_frames):
         ok, frame = cap.read()
@@ -262,39 +294,30 @@ def analyze(video, H=None, start=0.0, seconds=None, ball_model=None, model_path=
         cands.sort(key=lambda c: -c[0])  # 큰(가까운) 사람 우선
         cands = cands[:MAX_PLAYERS]
 
-        dets = [dict(pid=c[2], foot=c[5], app=appearance(frame, c[3], c[4], c[1])) for c in cands]
-        # 두 박스가 겹치면 옷 색이 섞이므로 그 프레임의 색은 기억에 반영하지 않는다
-        apart = len(cands) < 2 or _iou(_grow(cands[0][1]), _grow(cands[1][1])) == 0
-        chosen = assign_slots(dets, slot_state, id_slot, max([c[1][3] - c[1][1] for c in cands] or [1])) if slot_state else {}
-        for di in range(len(cands)):  # 아직 슬롯이 모자라면 새 선수
-            if di not in chosen and len(order) < MAX_PLAYERS:
-                k = len(order)
+        chosen = slots.step([dict(pid=c[2], foot=c[5], app=appearance(frame, c[3], c[4], c[1])) for c in cands],
+                            [c[1] for c in cands])
+        for k in range(len(slots.state)):
+            if k not in movers:
                 order.append(k)
                 movers[k] = Mover(MAX_STEP_M if H is not None else 1e9)
-                slot_state[k] = dict(foot=dets[di]["foot"], app=None)
-                chosen[di] = k
 
         seen = {}
         for di, slot in chosen.items():
             _, box, pid, xy, cf, foot, court = cands[di]
-            id_slot[pid] = slot
-            st_ = slot_state[slot]
-            if st_["app"] is None:
-                st_["app"] = dets[di]["app"] if apart else None
-            elif apart and appearance_dist(st_["app"], dets[di]["app"]) < APP_UPDATE_MAX:  # 확실히 같은 사람일 때만 갱신
-                st_["app"] = [(1 - APP_EMA) * a + APP_EMA * b for a, b in zip(st_["app"], dets[di]["app"])]
-            st_["foot"] = foot
             m = movers[slot]
             scale = 1.0 if H is not None else PLAYER_HEIGHT_M / max(box[3] - box[1], 1.0)
             m.update(court, fps, scale)
             wr = [list(xy[i]) for i in (9, 10) if cf[i] > 0.3]
-            seen[slot] = dict(v=1, box=box, foot=list(foot), pos=list(m.pos), dist=m.dist, speed=m.speed, w=wr)
-            if m.detect_shot(fi, m.swing_speed(xy, cf, fps), fps):
+            kp = {str(i): [xy[i][0], xy[i][1], cf[i]] for i in KP_IDX}  # swing_metrics.py가 나중에 쓸 전체 관절
+            sw = m.swing_speed(xy, cf, fps)
+            seen[slot] = dict(v=1, box=box, foot=list(foot), pos=list(m.pos), dist=m.dist, speed=m.speed, w=wr,
+                              kp=kp, sw=sw)
+            if m.detect_shot(fi, sw, fps):
                 swing_hits.append(dict(frame=fi - PEAK_LAG, slot=slot))
         players = []
         for slot in order:
             m = movers[slot]
-            players.append(seen.get(slot) or dict(v=0, pos=list(m.pos), dist=m.dist, speed=0.0, w=[]))
+            players.append(seen.get(slot) or dict(v=0, pos=list(m.pos), dist=m.dist, speed=0.0, w=[], kp={}, sw=0.0))
         frames.append(dict(p=players, b=detect_ball(ball, frame, ball_imgsz) if ball else []))
         if fi % 15 == 0:
             prev = frame.copy()
@@ -417,7 +440,8 @@ def main():
     ap.add_argument("--start", type=float, default=0, help="시작 초")
     ap.add_argument("--seconds", type=float, default=15)
     ap.add_argument("--names", nargs=2, help="선수 이름 2개")
-    ap.add_argument("--ball-model", help="공 탐지 모델(.pt). 있으면 공 궤적으로 타격/랠리를 보정")
+    ap.add_argument("--ball-model", default="models/ball.pt" if os.path.exists("models/ball.pt") else None,
+                    help="공 탐지 모델(.pt). 기본값은 models/ball.pt(있을 때). 있으면 공 궤적으로 타격/랠리를 보정")
     a = ap.parse_args()
     H = load_homography(a.calib) if a.calib else None
     for ev in process_video(a.video, a.out, H, a.start, a.seconds, a.names, a.ball_model):
@@ -461,7 +485,6 @@ def _self_check():
     hits = [m.detect_shot(i, v, 30) for i, v in enumerate(seq)]
     assert sum(hits) == 1 and 3 <= m.shots[0] <= 6, m.shots
     # 슬롯 배정: 옷 색이 다르면 트래커 ID가 서로 바뀌어도 원래 선수에게 돌려준다
-    import numpy as np
     img = np.zeros((200, 100, 3), np.uint8)
     xy = [(30, 50)] * 17
     xy[5], xy[6], xy[11], xy[12] = (20, 50), (80, 50), (25, 100), (75, 100)
