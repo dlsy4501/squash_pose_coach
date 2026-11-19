@@ -7,20 +7,25 @@
 """
 RALLY_GAP_S = 3.0     # 이 시간 이상 타격이 없으면 랠리가 끝난 것
 DECIDE_DELAY_S = 1.0  # 마지막 타격 후 이만큼 지나면 점수에 반영해서 보여준다
+SUSPECT_GAP_S = 4.5   # 바로 앞 랠리와 이만큼 이내로 붙어서 시작한 짧은 랠리는 타격 누락으로 잘못 쪼개졌을 수 있음
+SUSPECT_MAX_HITS = 2  # 이 타격 수 이하일 때만 "짧은 랠리"로 본다 (에이스 등 정상적인 경우도 있어 참고용 표시일 뿐)
 
 
 def split_rallies(hits, fps):
-    """hits: [{frame, slot, ...}] (프레임 순). 반환: [{id, start, end, hits, guess, reason}]"""
+    """hits: [{frame, slot, ...}] (프레임 순). 반환: [{id, start, end, hits, guess, reason, suspect}]
+    suspect: 타격 인식 누락으로 원래 한 랠리가 둘로 쪼개졌을 가능성이 있다는 표시(확정 아님, 참고용)."""
     rallies = []
     for h in hits:
         if rallies and h["frame"] - rallies[-1]["hits"][-1]["frame"] <= RALLY_GAP_S * fps:
             rallies[-1]["hits"].append(h)
         else:
             rallies.append(dict(id=len(rallies) + 1, hits=[h]))
-    for r in rallies:
+    for i, r in enumerate(rallies):
         r["start"], r["end"] = r["hits"][0]["frame"], r["hits"][-1]["frame"]
         r["guess"] = r["hits"][-1]["slot"]
         r["reason"] = "마지막 타격자 (추정)"
+        gap = (r["start"] - rallies[i - 1]["end"]) / fps if i > 0 else None
+        r["suspect"] = bool(i > 0 and len(r["hits"]) <= SUSPECT_MAX_HITS and gap <= SUSPECT_GAP_S)
     return rallies
 
 
@@ -48,7 +53,7 @@ def to_rows(rallies, fps, start=0.0):
 
 
 def export_rows(rallies, fps, start=0.0, names=None):
-    """랠리 기록 저장용: 랠리마다 시작/끝/길이(초), 타격 수, 득점자(이름), 정정 여부.
+    """랠리 기록 저장용: 랠리마다 시작/끝/길이(초), 타격 수, 득점자(이름), 정정 여부, 의심 표시.
     names가 있으면 득점자를 이름으로, 없으면 슬롯 번호로 적는다. 무효 랠리는 득점자 ""."""
     who = (lambda k: names[k]) if names else (lambda k: k)
     rows = []
@@ -56,7 +61,7 @@ def export_rows(rallies, fps, start=0.0, names=None):
         s0, s1 = start + r["start"] / fps, start + r["end"] / fps
         rows.append(dict(rally=r["id"], start_s=round(s0, 1), end_s=round(s1, 1), duration_s=round(s1 - s0, 1),
                          n_shots=len(r["hits"]), winner=who(r["winner"]) if r["winner"] is not None else "",
-                         manual=r.get("manual", False)))
+                         manual=r.get("manual", False), suspect=r.get("suspect", False)))
     return rows
 
 
@@ -65,7 +70,8 @@ def save_csv(rallies, fps, path, start=0.0, names=None):
     import csv
     rows = export_rows(rallies, fps, start, names)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=["rally", "start_s", "end_s", "duration_s", "n_shots", "winner", "manual"])
+        w = csv.DictWriter(f, fieldnames=["rally", "start_s", "end_s", "duration_s", "n_shots", "winner", "manual",
+                                          "suspect"])
         w.writeheader()
         w.writerows(rows)
     return path
@@ -89,11 +95,21 @@ def _self_check():
     assert to_rows(rs, 30)[0] == [1, 0.0, 3, 0, "마지막 타격자 (추정)"]
 
     rows = export_rows(rs, 30, names=["민수", "지훈"])
-    assert rows[0] == dict(rally=1, start_s=0.0, end_s=2.0, duration_s=2.0, n_shots=3, winner="민수", manual=False)
+    assert rows[0] == dict(rally=1, start_s=0.0, end_s=2.0, duration_s=2.0, n_shots=3, winner="민수", manual=False,
+                           suspect=False)
     assert rows[2]["winner"] == ""  # 무효 랠리는 득점자 없음
     import tempfile
     path = save_csv(rs, 30, tempfile.mktemp(suffix=".csv"), names=["민수", "지훈"])
-    assert open(path, encoding="utf-8-sig").readline().strip() == "rally,start_s,end_s,duration_s,n_shots,winner,manual"
+    assert (open(path, encoding="utf-8-sig").readline().strip()
+            == "rally,start_s,end_s,duration_s,n_shots,winner,manual,suspect")
+
+    # 타격 누락 의심: 짧은 랠리(타격<=2)가 바로 앞 랠리 뒤에 SUSPECT_GAP_S 이내로 바짝 붙어서 시작하면 표시
+    far_hits = [H(0, 0), H(30, 1), H(60, 0), H(60 + 31 * 30, 1)]  # 둘째 랠리: 1타격, 31초 뒤
+    far = split_rallies(far_hits, 30)
+    assert far[1]["suspect"] is False  # 31초 차이면 RALLY_GAP_S(3초)는 넘지만 SUSPECT_GAP_S(4.5초)보단 훨씬 길다
+    tight_hits = [H(0, 0), H(30, 1), H(60, 0), H(60 + 4 * 30, 1)]  # 둘째 랠리: 1타격, 4초 뒤(의심 구간 안)
+    tight = split_rallies(tight_hits, 30)
+    assert tight[1]["suspect"] is True
     print("self-check OK")
 
 

@@ -23,6 +23,7 @@ from rally import apply_winners, score_at, split_rallies
 COURT_W, COURT_L = 6.4, 9.75  # m
 SHORT_LINE = 5.44
 MAX_STEP_M = 2.0   # 한 프레임에 이보다 많이 움직이면 ID 스위치/오검출로 보고 무시
+MIN_STEP_M = 0.03  # 한 프레임에 이보다 적게 움직이면 떨림(잡음)으로 보고 거리에 안 더함
 EMA = 0.3
 SWING_SPEED = 10.0  # 손목 속도(몸통길이/초, 3프레임 평균) 이 이상의 피크를 타격으로 봄
 MIN_SHOT_GAP_S = 0.7
@@ -93,7 +94,7 @@ class Mover:
         else:
             q = (self.pos[0] + EMA * (p[0] - self.pos[0]), self.pos[1] + EMA * (p[1] - self.pos[1]))
             step = math.dist(q, self.pos) * scale
-            if step < self.max_step:
+            if MIN_STEP_M < step < self.max_step:
                 self.dist += step
                 self.speed += EMA * (step * fps - self.speed)
                 self.pos = q
@@ -475,6 +476,14 @@ def _self_check():
     d = m.dist
     m.update((6.0, 6.0))
     assert m.dist == d
+
+    # Mover: 가만히 서 있을 때의 작은 떨림(잡음)은 거리로 안 쌓인다
+    m = Mover()
+    m.update((0, 0))
+    for i in range(200):
+        jitter = 0.01 if i % 2 == 0 else -0.01
+        m.update((jitter, 0))
+    assert m.dist < 0.05, m.dist
 
     # in_court: 관중 위치는 걸러진다
     assert in_court((3, 5)) and not in_court((3, 15))

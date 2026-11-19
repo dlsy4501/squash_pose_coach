@@ -117,9 +117,10 @@ def summary_md(summary, ball_used):
 
 
 def rally_rows(data, names):
-    """표시용 행: [랠리, 시작(초), 타격 수, 득점자 이름]"""
+    """표시용 행: [랠리, 시작(초), 타격 수, 득점자 이름]. 타격 누락으로 잘못 쪼개졌을 수 있는 랠리는 이름 뒤에 ⚠ 표시."""
     who = lambda k: names[k] if k is not None else "무효"
-    return [[r["id"], round(data["start"] + r["start"] / data["fps"], 1), len(r["hits"]), who(r["winner"])]
+    return [[r["id"], round(data["start"] + r["start"] / data["fps"], 1), len(r["hits"]),
+             who(r["winner"]) + (" ⚠" if r.get("suspect") else "")]
             for r in data["rallies"]]
 
 
@@ -241,9 +242,12 @@ def build():
         with gr.Row():
             preview = gr.Image(label="진행 화면", interactive=False)
             result = gr.Video(label="결과 영상", interactive=False)
+        gr.Markdown("### 경기 요약")
         table = gr.Markdown()
         gr.Markdown("### ④ 랠리별 득점자 확인\n득점자 칸을 **선수 이름**(또는 `무효`)으로 고친 뒤 아래 버튼을 누르면 "
-                    "점수가 반영된 영상을 다시 만들어요. (분석은 다시 하지 않아서 빨라요)")
+                    "점수가 반영된 영상을 다시 만들어요. (분석은 다시 하지 않아서 빨라요)\n\n"
+                    "⚠ 표시: 타격이 인식 안 된 구간 때문에 원래 한 랠리가 둘로 잘못 쪼개졌을 수 있어요. "
+                    "앞 랠리와 이어진 건 아닌지 확인해 주세요.")
         rallies = gr.Dataframe(headers=["랠리", "시작(초)", "타격 수", "득점자"], datatype=["number", "number", "number", "str"],
                                col_count=(4, "fixed"), interactive=True, label="랠리 목록")
         redo = gr.Button("점수 반영해서 영상 다시 만들기")
