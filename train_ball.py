@@ -35,6 +35,7 @@ def main():
     ap.add_argument("--imgsz", type=int, default=960)
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--device", default="0" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--workers", type=int, default=4)
     a = ap.parse_args()
 
     root = os.path.abspath(a.data)
@@ -51,6 +52,7 @@ def main():
         data=os.path.join(root, "data.yaml"), epochs=a.epochs, imgsz=a.imgsz, batch=a.batch,
         device=a.device, project=os.path.abspath("runs"), name="ball", exist_ok=True,
         fliplr=0.5, flipud=0.0, mosaic=0.5,  # 공은 작아서 mosaic은 약하게
+        workers=a.workers,
     )
 
 
