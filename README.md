@@ -25,7 +25,7 @@
 - 공 인식은 GPU에서 학습한 모델(`models/ball.pt`)이 있어야 합니다. 자세한 방법은 `사용 설명서.md`를 보세요.
 - 샷 종류(포핸드/백핸드 등)는 아직 없습니다.
 
-개발자용: `python app.py` (웹 앱), `python track_overlay.py --help` (CLI), `label_ball.py`/`train_ball.py`/`pseudo_label.py` (공 탐지 학습), `ball_track.py`/`rally.py` (궤적 후처리, 랠리/점수). 자세한 설명은 `사용 설명서.md`.
+개발자용: `python app.py` (웹 앱), `python track_overlay.py --help` (CLI), `overlay_ui.py`(중계 화면 그래픽)/`report.py`(요약 리포트), `label_ball.py`/`train_ball.py`/`pseudo_label.py` (공 탐지 학습), `ball_track.py`/`rally.py` (궤적 후처리, 랠리/점수), `swing_metrics.py` (스윙별 자세 지표 계산 — 아직 앱 화면에는 연결 안 됨). 자세한 설명은 `사용 설명서.md`.
 
 ---
 
