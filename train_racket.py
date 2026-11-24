@@ -1,17 +1,21 @@
 """
-label_racket.py로 만든 racket_dataset으로 라켓 탐지 모델을 파인튜닝한다.
-라켓 있는 프레임/없는 프레임을 각각 8:2로 나눠 train/val 목록(txt)을 만들고 YOLO 학습을 돌린다.
-결과: runs/racket/weights/best.pt
+label_racket.py로 만든 racket_dataset(라켓 헤드 4키포인트: 팁/오른쪽/목/왼쪽)으로 라켓 탐지+키포인트
+모델을 파인튜닝한다. 라켓 있는 프레임/없는 프레임을 각각 8:2로 나눠 train/val 목록(txt)을 만들고
+YOLO-pose 학습을 돌린다. 결과: runs/racket/weights/best.pt
 
 사용법:
     python train_racket.py --epochs 50
-공과 달리 라켓은 화면에서 크게 보이므로 imgsz는 공 모델보다 작아도 된다. CUDA GPU가 있으면 자동으로
+라켓은 화면에서 크게 보이므로 imgsz는 공 모델보다 작아도 된다. CUDA GPU가 있으면 자동으로
 쓰고, 없으면 CPU(느림). train/val 분할 로직은 train_ball.py와 공유한다.
+학습된 모델은 .predict()의 boxes뿐 아니라 keypoints(팁/오른쪽/목/왼쪽, racket_face.py 순서)도
+내놓으므로, racket_face.openness()로 "면이 얼마나 열렸는지"까지 바로 계산할 수 있다.
 """
 import argparse
 import os
 
 from train_ball import split
+
+N_KPT = 4  # 팁, 오른쪽, 목, 왼쪽 (label_racket.py / racket_face.py와 순서 동일)
 
 
 def main():
@@ -33,10 +37,15 @@ def main():
         with open(os.path.join(root, f"{name}.txt"), "w") as f:
             f.write("\n".join(os.path.join(img_dir, x) for x in files) + "\n")
     with open(os.path.join(root, "data.yaml"), "w") as f:
-        f.write(f"path: {root}\ntrain: train.txt\nval: val.txt\nnames:\n  0: racket\n")
+        f.write(
+            f"path: {root}\ntrain: train.txt\nval: val.txt\n"
+            f"kpt_shape: [{N_KPT}, 3]\n"  # (x, y, visibility) * 4점 (팁/오른쪽/목/왼쪽)
+            "flip_idx: [0, 3, 2, 1]\n"  # 좌우반전 시 팁<->팁, 목<->목, 오른쪽<->왼쪽
+            "names:\n  0: racket\n"
+        )
     print(f"train {len(train)}장 / val {len(val)}장")
 
-    YOLO("yolo11n.pt").train(
+    YOLO("yolo11n-pose.pt").train(
         data=os.path.join(root, "data.yaml"), epochs=a.epochs, imgsz=a.imgsz, batch=a.batch,
         device=a.device, project=os.path.abspath("runs"), name="racket", exist_ok=True,
         fliplr=0.5, flipud=0.0, mosaic=1.0,  # 라켓은 커서 공 모델보다 mosaic을 세게 써도 됨
