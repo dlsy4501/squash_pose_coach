@@ -49,6 +49,8 @@
 | `label_ball.py` | 공 위치 라벨링 도구 (공 탐지 모델 학습용 데이터 만들기) |
 | `train_ball.py` | 라벨링된 데이터로 공 탐지 모델 학습 (GPU 권장) |
 | `pseudo_label.py` | 학습된 모델로 가짜 라벨을 만들어 라벨링 노동 줄이기 |
+| `label_racket.py` | 라켓 위치 라벨링 도구 (드래그로 박스 지정, `racket_dataset/` 생성) |
+| `train_racket.py` | 라벨링된 데이터로 라켓 탐지 모델 학습 (GPU 권장). 아직 `track_overlay.py`/`app.py`에는 연결 안 됨 |
 
 ### CLI로 직접 돌리기
 
