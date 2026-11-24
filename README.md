@@ -49,8 +49,9 @@
 | `label_ball.py` | 공 위치 라벨링 도구 (공 탐지 모델 학습용 데이터 만들기) |
 | `train_ball.py` | 라벨링된 데이터로 공 탐지 모델 학습 (GPU 권장) |
 | `pseudo_label.py` | 학습된 모델로 가짜 라벨을 만들어 라벨링 노동 줄이기 |
-| `label_racket.py` | 라켓 위치 라벨링 도구 (드래그로 박스 지정, `racket_dataset/` 생성) |
-| `train_racket.py` | 라벨링된 데이터로 라켓 탐지 모델 학습 (GPU 권장). 아직 `track_overlay.py`/`app.py`에는 연결 안 됨 |
+| `label_racket.py` | 라켓 헤드 키포인트 라벨링 도구 (팁/오른쪽/목/왼쪽 4점 클릭, `racket_dataset/` 생성) |
+| `train_racket.py` | 라벨링된 데이터로 라켓 탐지+키포인트(YOLO-pose) 모델 학습 (GPU 권장). 아직 `track_overlay.py`/`app.py`에는 연결 안 됨 |
+| `racket_face.py` | 라켓 헤드 4키포인트로 "면이 카메라 쪽으로 얼마나 열려 있는지"(각도) 계산 |
 
 ### CLI로 직접 돌리기
 
